@@ -1,0 +1,19 @@
+name: pna_env
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - numpy=1.26.4
+  - pandas=2.1.4
+  - pillow=10.3.0
+  - pip
+  - pip:
+      - torch==2.4.1
+      - torchvision==0.19.1
+      - torchaudio==2.4.1
+      - scikit-learn==1.4.2
+      - pydicom==2.4.3
+      - tqdm==4.66.4
+
