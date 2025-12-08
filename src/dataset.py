@@ -138,6 +138,14 @@ class RSNADataset(Dataset):
         if record.has_target and len(record.boxes) > 0:
             xyxy = _xywh_to_xyxy(record.boxes.astype(np.float32))
             boxes = torch.from_numpy(xyxy).to(dtype=torch.float32)
+            # 纠正可能存在的 x1/x2、y1/y2 颠倒，并确保宽高为正。
+            x1 = torch.min(boxes[:, 0], boxes[:, 2])
+            y1 = torch.min(boxes[:, 1], boxes[:, 3])
+            x2 = torch.max(boxes[:, 0], boxes[:, 2])
+            y2 = torch.max(boxes[:, 1], boxes[:, 3])
+            boxes = torch.stack([x1, y1, x2, y2], dim=1)
+            valid = (x2 > x1) & (y2 > y1)
+            boxes = boxes[valid]
             labels = torch.ones((boxes.shape[0],), dtype=torch.int64)
 
         # torchvision detection 期望的 target 键。

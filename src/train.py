@@ -11,7 +11,8 @@ from typing import Any, Dict
 
 import torch
 from torch.utils.data import DataLoader
-from torchvision.models.detection import FastRCNNPredictor, FasterRCNN_ResNet50_FPN_Weights, fasterrcnn_resnet50_fpn
+from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights, fasterrcnn_resnet50_fpn
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 from dataset import RSNADataset, collate_fn
 from engine import evaluate, train_one_epoch
@@ -35,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--labels-csv",
         type=Path,
-        default=Path("data/stage_2_train_labels.csv/stage_2_train_labels.csv"),
+        default=Path("data/stage_2_train_labels.csv"),
         help="CSV with bounding boxes.",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("outputs/faster_rcnn"), help="Where to store checkpoints and logs.")
@@ -145,10 +146,18 @@ def main() -> None:
     save_config(config, output_dir)
 
     metrics_path = output_dir / "metrics.jsonl"
+    iter_metrics_path = output_dir / "metrics_iters.jsonl"
+    avg_iter_loss_path = output_dir / "avg_iter_loss.json"
+    # 每次新启动训练前清空 iter 级别日志。
+    if iter_metrics_path.exists():
+        iter_metrics_path.unlink()
+    # 每次新启动训练前清空 avg_iter_loss.json
+    if avg_iter_loss_path.exists():
+        avg_iter_loss_path.unlink()
     best_val_loss = float("inf")
 
     for epoch in range(start_epoch, args.epochs + 1):
-        train_metrics = train_one_epoch(model, optimizer, train_loader, device, epoch, scaler=scaler)
+        train_metrics, iter_losses = train_one_epoch(model, optimizer, train_loader, device, epoch, scaler=scaler, output_dir=output_dir)
         val_metrics = evaluate(model, val_loader, device, scaler=scaler)
         lr_scheduler.step()
 
@@ -178,6 +187,16 @@ def main() -> None:
         }
         with metrics_path.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(log_entry) + "\n")
+
+        # 逐 iter 记录训练 loss 曲线（全局 step = 从 1 累加）
+        for iteration, loss_value in enumerate(iter_losses, start=1):
+            iter_entry = {
+                "epoch": epoch,
+                "iteration": iteration,
+                "loss": loss_value,
+            }
+            with iter_metrics_path.open("a", encoding="utf-8") as fp:
+                fp.write(json.dumps(iter_entry) + "\n")
 
         print(f"[Epoch {epoch}] val_loss={val_loss:.4f} best={best_val_loss:.4f}")
 
