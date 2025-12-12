@@ -3,12 +3,18 @@
 
 用法（在项目根目录运行）：
 
-    python plot_metrics.py --metrics-file outputs/faster_rcnn/metrics.jsonl --out-dir outputs/faster_rcnn
+    # 指定具体的实验文件夹（训练时会自动创建以时间戳命名的文件夹）
+    python plot_metrics.py --metrics-file outputs/faster_rcnn/202412011430/metrics.jsonl --out-dir outputs/faster_rcnn/202412011430
+    
+    # 或者使用默认路径（需要根据实际实验文件夹调整）
+    python plot_metrics.py --metrics-file outputs/faster_rcnn/YYYYMMDDHHMM/metrics.jsonl --out-dir outputs/faster_rcnn/YYYYMMDDHHMM
 
 会在 out-dir 下生成若干 png 图片：
 - losses_train.png
 - losses_val.png
 - val_loss.png  （按 epoch 的总验证损失）
+- val_map.png   （mAP 随 epoch 变化，如果启用了 mAP 评估）
+- map_iter.png  （mAP 随 iteration 变化，如果每 N 个 iteration 计算了 mAP）
 """
 
 from __future__ import annotations
@@ -40,6 +46,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/faster_rcnn/avg_iter_loss.json"),
         help="Path to avg_iter_loss.json with avg_loss and iteration.",
+    )
+    parser.add_argument(
+        "--iter-map-file",
+        type=Path,
+        default=Path("outputs/faster_rcnn/metrics_map_iters.jsonl"),
+        help="Path to metrics_map_iters.jsonl with per-iteration mAP values.",
     )
     parser.add_argument(
         "--out-dir",
@@ -99,6 +111,21 @@ def load_avg_iter_loss(json_file: Path) -> List[Dict]:
         return []
 
 
+def load_iter_map_metrics(iter_map_file: Path) -> List[Dict]:
+    """读取逐 iter 的 mAP 日志，每行包含 epoch / iteration / global_iteration / val_map。"""
+    if not iter_map_file.is_file():
+        return []
+
+    records: List[Dict] = []
+    with iter_map_file.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+    return records
+
+
 def plot_metric_dict_per_epoch(
     epochs: List[int],
     metrics_per_epoch: List[Dict[str, float]],
@@ -135,6 +162,45 @@ def plot_val_loss(epochs: List[int], val_losses: List[float], outfile: Path) -> 
     plt.xlabel("Epoch")
     plt.ylabel("Total val loss")
     plt.title("Validation loss per epoch")
+    plt.grid(True, linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(outfile)
+    plt.close()
+
+
+def plot_val_map(epochs: List[int], val_maps: List[float], outfile: Path) -> None:
+    """绘制mAP随epoch变化的曲线。"""
+    plt.figure(figsize=(6, 4))
+    plt.plot(epochs, val_maps, marker="o", color="green")
+    plt.xlabel("Epoch")
+    plt.ylabel("mAP")
+    plt.title("Validation mAP per epoch")
+    plt.grid(True, linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(outfile)
+    plt.close()
+
+
+def plot_iter_map(iter_map_records: List[Dict], outfile: Path) -> None:
+    """
+    根据 metrics_map_iters.jsonl 中的记录画出 mAP-iteration 曲线。
+    x 轴使用全局 iteration。
+    """
+    if not iter_map_records:
+        return
+
+    # 按 global_iteration 排序确保时间顺序
+    iter_map_records = sorted(iter_map_records, key=lambda r: int(r["global_iteration"]))
+    maps = [float(r["val_map"]) for r in iter_map_records]
+    global_iterations = [int(r["global_iteration"]) for r in iter_map_records]
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(global_iterations, maps, marker="o", markersize=4, linewidth=1.5, color="green")
+    plt.xlabel("Global Iteration")
+    plt.ylabel("mAP")
+    plt.title("mAP per iteration")
     plt.grid(True, linestyle="--", alpha=0.3)
     plt.tight_layout()
     outfile.parent.mkdir(parents=True, exist_ok=True)
@@ -213,11 +279,13 @@ def main() -> None:
     metrics_file: Path = args.metrics_file
     iter_metrics_file: Path = args.iter_metrics_file
     avg_iter_loss_file: Path = args.avg_iter_loss_file
+    iter_map_file: Path = args.iter_map_file
     out_dir: Path = args.out_dir or metrics_file.parent
 
     records = load_metrics(metrics_file)
     iter_records = load_iter_metrics(iter_metrics_file)
     avg_loss_records = load_avg_iter_loss(avg_iter_loss_file)
+    iter_map_records = load_iter_map_metrics(iter_map_file)
 
     # 如果有 epoch 级别的数据，画 epoch 相关的图
     if records:
@@ -225,6 +293,7 @@ def main() -> None:
         train_metrics_list: List[Dict[str, float]] = [r.get("train_metrics", {}) for r in records]
         val_metrics_list: List[Dict[str, float]] = [r.get("val_metrics", {}) for r in records]
         val_losses: List[float] = [float(r.get("val_loss", 0.0)) for r in records]
+        val_maps: List[float] = [float(r.get("val_map", 0.0)) for r in records if "val_map" in r]
 
         # 训练/验证各个 loss 分量
         plot_metric_dict_per_epoch(
@@ -242,6 +311,10 @@ def main() -> None:
 
         # 总验证损失
         plot_val_loss(epochs, val_losses, outfile=out_dir / "val_loss.png")
+        
+        # mAP随epoch变化
+        if val_maps:
+            plot_val_map(epochs[:len(val_maps)], val_maps, outfile=out_dir / "val_map.png")
     else:
         print(f"Warning: {metrics_file} not found, skipping epoch-level plots.")
 
@@ -257,8 +330,14 @@ def main() -> None:
     else:
         print(f"Warning: {avg_iter_loss_file} not found, skipping avg_loss vs iteration plot.")
 
-    if not records and not iter_records and not avg_loss_records:
-        raise RuntimeError(f"No metrics found. Check if {metrics_file}, {iter_metrics_file}, or {avg_iter_loss_file} exists.")
+    # mAP vs iteration 曲线
+    if iter_map_records:
+        plot_iter_map(iter_map_records, outfile=out_dir / "map_iter.png")
+    else:
+        print(f"Warning: {iter_map_file} not found, skipping iteration-level mAP plot.")
+
+    if not records and not iter_records and not avg_loss_records and not iter_map_records:
+        raise RuntimeError(f"No metrics found. Check if {metrics_file}, {iter_metrics_file}, {avg_iter_loss_file}, or {iter_map_file} exists.")
 
     print(f"Saved plots to: {out_dir}")
 

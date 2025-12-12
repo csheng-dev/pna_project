@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Tuple
 import torch
 from torch import Tensor
 
+from map_metric import calculate_mean_average_precision
+
 
 def _sanitize_targets(targets):
     """
@@ -93,10 +95,36 @@ def train_one_epoch(
     scaler: torch.cuda.amp.GradScaler | None = None,
     print_freq: int = 25,
     output_dir: Path | str | None = None,
-) -> Tuple[Dict[str, float], List[float]]:
+    global_iteration: int = 0,
+    eval_map_every: int | None = None,
+    val_loader = None,
+    score_threshold: float = 0.05,
+) -> Tuple[Dict[str, float], List[float], List[Dict[str, float | int]]]:
+    """
+    训练一个epoch。
+    
+    Args:
+        model: 模型
+        optimizer: 优化器
+        data_loader: 训练数据加载器
+        device: 设备
+        epoch: 当前epoch编号
+        scaler: AMP scaler
+        print_freq: 打印频率
+        output_dir: 输出目录
+        global_iteration: 全局iteration计数（跨epoch累计）
+        eval_map_every: 每N个iteration计算一次mAP，None表示不计算
+        val_loader: 验证数据加载器，用于计算mAP
+        score_threshold: mAP计算的置信度阈值
+    
+    Returns:
+        (epoch_metrics, iter_losses, map_records)
+        map_records: 包含每N个iteration的mAP记录列表，每个记录包含epoch、iteration、global_iteration、val_map
+    """
     model.train()
     metric_logger = defaultdict[Any, list](list)
     iter_losses: List[float] = []
+    map_records: List[Dict[str, float | int]] = []  # 记录每N个iteration的mAP
     # 记录一个开始时间用于打印吞吐信息。
     start = time.time()
 
@@ -123,6 +151,22 @@ def train_one_epoch(
         for key, value in loss_dict_reduced.items():
             metric_logger[key].append(value)
 
+        current_global_iter = global_iteration + iteration
+        
+        # 每N个iteration计算一次mAP
+        if eval_map_every is not None and val_loader is not None and current_global_iter % eval_map_every == 0:
+            val_map = evaluate_map(model, val_loader, device, score_threshold=score_threshold)
+            print(f"[Epoch {epoch} | Global Iter {current_global_iter}] val_map={val_map:.4f}")
+            # 记录mAP值
+            map_records.append({
+                "epoch": epoch,
+                "iteration": iteration,
+                "global_iteration": current_global_iter,
+                "val_map": val_map,
+            })
+            # 确保计算完mAP后模型切换回训练模式
+            model.train()
+
         if iteration % print_freq == 0:
             current = time.time()
             avg_loss = sum(metric_logger["loss_classifier"]) / len(metric_logger["loss_classifier"])
@@ -130,7 +174,7 @@ def train_one_epoch(
             _save_avg_loss_to_json(avg_loss, iteration, epoch, output_dir=output_dir)
 
     epoch_metrics = {k: sum(v) / len(v) for k, v in metric_logger.items() if v}
-    return epoch_metrics, iter_losses
+    return epoch_metrics, iter_losses, map_records
 
 
 @torch.no_grad()
@@ -156,4 +200,71 @@ def evaluate(
             metric_logger[key].append(value)
 
     return {k: sum(v) / len(v) for k, v in metric_logger.items() if v}
+
+
+@torch.no_grad()
+def evaluate_map(
+    model: torch.nn.Module,
+    data_loader,
+    device: torch.device,
+    score_threshold: float = 0.05,
+    iou_thresholds: List[float] | None = None,
+) -> float:
+    """
+    评估模型在验证集上的加权平均precision (mAP)。
+    
+    Args:
+        model: 检测模型
+        data_loader: 验证数据加载器
+        device: 计算设备
+        score_threshold: 预测框的置信度阈值，低于此值的预测框将被过滤
+        iou_thresholds: IoU阈值列表，默认为 [0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75]
+    
+    Returns:
+        加权平均precision (mAP) 值
+    """
+    model.eval()  # 评估模式，用于获取预测结果
+    
+    all_pred_boxes: List[Tensor] = []
+    all_pred_scores: List[Tensor] = []
+    all_gt_boxes: List[Tensor] = []
+    
+    for images, targets in data_loader:
+        images = [img.to(device) for img in images]
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        
+        # 获取模型预测
+        outputs = model(images)
+        
+        # 处理每个样本
+        for output, target in zip(outputs, targets):
+            # 获取预测框和置信度
+            pred_boxes = output["boxes"].cpu()  # [N, 4] xyxy格式
+            pred_scores = output["scores"].cpu()  # [N]
+            
+            # 过滤低置信度的预测框
+            if len(pred_boxes) > 0:
+                keep = pred_scores >= score_threshold
+                pred_boxes = pred_boxes[keep]
+                pred_scores = pred_scores[keep]
+            
+            # 获取真实标注框
+            gt_boxes = target["boxes"].cpu()  # [M, 4] xyxy格式
+            
+            # 收集数据
+            all_pred_boxes.append(pred_boxes)
+            all_pred_scores.append(pred_scores)
+            all_gt_boxes.append(gt_boxes)
+    
+    # 计算mAP（所有框都是xyxy格式）
+    map_score = calculate_mean_average_precision(
+        all_pred_boxes,
+        all_pred_scores,
+        all_gt_boxes,
+        iou_thresholds=iou_thresholds,
+        pred_format="xyxy",
+        gt_format="xyxy",
+    )
+    
+    return map_score
 

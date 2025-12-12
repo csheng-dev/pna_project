@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
 
@@ -15,7 +16,7 @@ from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights, faster
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 from dataset import RSNADataset, collate_fn
-from engine import evaluate, train_one_epoch
+from engine import evaluate, evaluate_map, train_one_epoch
 from transforms import build_eval_transforms, build_train_transforms
 from utils import count_parameters, save_config, seed_everything, stratified_patient_split
 
@@ -55,6 +56,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit-val", type=int, default=None, help="Optional cap on number of validation patients for debugging.")
     parser.add_argument("--resume", type=Path, default=None, help="Path to a checkpoint to resume from.")
     parser.add_argument("--device", type=str, default=None, help="Torch device identifier (e.g., cuda:0).")
+    parser.add_argument("--eval-map", action="store_true", help="Evaluate mAP during validation.")
+    parser.add_argument("--score-threshold", type=float, default=0.05, help="Score threshold for mAP evaluation.")
+    parser.add_argument("--eval-map-every", type=int, default=5000, help="Evaluate mAP every N iterations (default: 5000).")
     return parser.parse_args()
 
 
@@ -66,8 +70,13 @@ def save_checkpoint(state: Dict, output_dir: Path, filename: str) -> None:
 
 def main() -> None:
     args = parse_args()
-    output_dir = args.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # 创建基于当前时间的实验文件夹（格式：YYYYMMDDHHMM）
+    timestamp = datetime.now().strftime("%Y%m%d%H%M")
+    experiment_dir = args.output_dir / timestamp
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = experiment_dir
+    
+    print(f"Experiment output directory: {output_dir}")
 
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
     # 保持随机性一致，方便复现实验。
@@ -119,6 +128,7 @@ def main() -> None:
     start_epoch = 1
     scaler = torch.amp.GradScaler(device_type="cuda") if args.use_amp and device.type == "cuda" else None
 
+    checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint["model"])
@@ -148,23 +158,85 @@ def main() -> None:
     metrics_path = output_dir / "metrics.jsonl"
     iter_metrics_path = output_dir / "metrics_iters.jsonl"
     avg_iter_loss_path = output_dir / "avg_iter_loss.json"
+    iter_map_path = output_dir / "metrics_map_iters.jsonl"  # 记录每N个iteration的mAP
     # 每次新启动训练前清空 iter 级别日志。
     if iter_metrics_path.exists():
         iter_metrics_path.unlink()
     # 每次新启动训练前清空 avg_iter_loss.json
     if avg_iter_loss_path.exists():
         avg_iter_loss_path.unlink()
+    # 每次新启动训练前清空 iter 级别的 mAP 日志
+    if iter_map_path.exists():
+        iter_map_path.unlink()
     best_val_loss = float("inf")
 
+    best_map = 0.0  # 用于跟踪最佳mAP
+    
+    # 计算全局iteration计数（用于跨epoch的iteration计数）
+    # 如果从checkpoint恢复，需要计算之前的iteration数
+    global_iteration = 0
+    if args.resume and "global_iteration" in checkpoint:
+        global_iteration = checkpoint["global_iteration"]
+    else:
+        # 计算之前所有epoch的总iteration数
+        for prev_epoch in range(1, start_epoch):
+            global_iteration += len(train_loader)
+    
     for epoch in range(start_epoch, args.epochs + 1):
-        train_metrics, iter_losses = train_one_epoch(model, optimizer, train_loader, device, epoch, scaler=scaler, output_dir=output_dir)
+        # 训练一个epoch，并传递全局iteration计数和mAP评估参数
+        train_metrics, iter_losses, map_records = train_one_epoch(
+            model, 
+            optimizer, 
+            train_loader, 
+            device, 
+            epoch, 
+            scaler=scaler, 
+            output_dir=output_dir,
+            global_iteration=global_iteration,
+            eval_map_every=args.eval_map_every if args.eval_map else None,
+            val_loader=val_loader if args.eval_map else None,
+            score_threshold=args.score_threshold,
+        )
+        
+        # 记录每N个iteration的mAP
+        if args.eval_map and map_records:
+            for map_record in map_records:
+                with iter_map_path.open("a", encoding="utf-8") as fp:
+                    fp.write(json.dumps(map_record) + "\n")
+        
+        # 更新全局iteration计数
+        global_iteration += len(train_loader)
+        
         val_metrics = evaluate(model, val_loader, device, scaler=scaler)
+        
+        # 计算mAP（如果启用）
+        val_map = None
+        if args.eval_map:
+            val_map = evaluate_map(model, val_loader, device, score_threshold=args.score_threshold)
+        
         lr_scheduler.step()
 
         val_loss = sum(val_metrics.values())
         is_best = val_loss < best_val_loss
         if is_best:
             best_val_loss = val_loss
+        
+        # 如果启用了mAP评估，也根据mAP保存最佳模型
+        if args.eval_map and val_map is not None:
+            if val_map > best_map:
+                best_map = val_map
+                # 保存基于mAP的最佳模型
+                checkpoint_state_map = {
+                    "epoch": epoch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": lr_scheduler.state_dict(),
+                    "scaler": scaler.state_dict() if scaler else None,
+                    "val_loss": val_loss,
+                    "val_map": val_map,
+                    "global_iteration": global_iteration,
+                }
+                save_checkpoint(checkpoint_state_map, output_dir, "best_model_map.pth")
 
         checkpoint_state = {
             "epoch": epoch,
@@ -173,7 +245,10 @@ def main() -> None:
             "scheduler": lr_scheduler.state_dict(),
             "scaler": scaler.state_dict() if scaler else None,
             "val_loss": val_loss,
+            "global_iteration": global_iteration,
         }
+        if args.eval_map and val_map is not None:
+            checkpoint_state["val_map"] = val_map
         save_checkpoint(checkpoint_state, output_dir, "last_checkpoint.pth")
         if is_best:
             save_checkpoint(checkpoint_state, output_dir, "best_model.pth")
@@ -185,6 +260,9 @@ def main() -> None:
             "val_loss": val_loss,
             "best_val_loss": best_val_loss,
         }
+        if args.eval_map and val_map is not None:
+            log_entry["val_map"] = val_map
+            log_entry["best_map"] = best_map
         with metrics_path.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(log_entry) + "\n")
 
@@ -198,7 +276,10 @@ def main() -> None:
             with iter_metrics_path.open("a", encoding="utf-8") as fp:
                 fp.write(json.dumps(iter_entry) + "\n")
 
-        print(f"[Epoch {epoch}] val_loss={val_loss:.4f} best={best_val_loss:.4f}")
+        if args.eval_map and val_map is not None:
+            print(f"[Epoch {epoch}] val_loss={val_loss:.4f} best={best_val_loss:.4f} val_map={val_map:.4f} best_map={best_map:.4f}")
+        else:
+            print(f"[Epoch {epoch}] val_loss={val_loss:.4f} best={best_val_loss:.4f}")
 
 
 if __name__ == "__main__":
