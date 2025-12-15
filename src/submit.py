@@ -1,15 +1,13 @@
 """
-运行阶段二测试集的推理脚本：加载训练好的 Faster R-CNN checkpoint，
-对 `stage_2_test_images/` 中的所有 DICOM 图像推理，并按照
-`stage_2_sample_submission.csv` 的格式生成提交文件。
+提交脚本：从指定的实验文件夹加载最佳模型，对测试集进行预测并生成提交文件。
 
 使用示例（在项目根目录）：
 
-    python test.py \
-        --checkpoint outputs/faster_rcnn/best_model.pth \
+    python src/submit.py \
+        --experiment-dir outputs/faster_rcnn/202512122208 \
         --images-dir data/stage_2_test_images \
         --sample-submission data/stage_2_sample_submission.csv \
-        --output-csv outputs/faster_rcnn/submission.csv
+        --output-csv outputs/faster_rcnn/202512122208/submission.csv
 """
 
 from __future__ import annotations
@@ -22,17 +20,30 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from src.dataset import _load_dicom_image
-from src.train import build_model
+from dataset import _load_dicom_image
+from train import build_model
+
+# 确保使用本地缓存的权重，避免重新下载
+# 权重文件应该在 ~/.cache/torch/hub/checkpoints/resnet50-0676ba61.pth
+torch_cache_dir = Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
+if not torch_cache_dir.exists():
+    torch_cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run inference on RSNA test set and generate submission CSV.")
+    parser = argparse.ArgumentParser(description="Generate submission CSV from trained model.")
     parser.add_argument(
-        "--checkpoint",
+        "--experiment-dir",
         type=Path,
-        default=Path("outputs/faster_rcnn/best_model.pth"),
-        help="Path to the trained checkpoint (.pth) containing model weights.",
+        default=Path("outputs/faster_rcnn/202512122208"),
+        help="Directory containing the experiment checkpoints.",
+    )
+    parser.add_argument(
+        "--model-file",
+        type=str,
+        default=None,
+        help="Specific model file to use (e.g., 'best_model.pth' or 'best_model_map.pth'). "
+        "If not specified, will try best_model_map.pth, then best_model.pth, then last_checkpoint.pth.",
     )
     parser.add_argument(
         "--images-dir",
@@ -49,8 +60,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-csv",
         type=Path,
-        default=Path("outputs/faster_rcnn/submission.csv"),
-        help="Where to save the generated submission CSV.",
+        default=None,
+        help="Where to save the generated submission CSV. "
+        "Defaults to {experiment-dir}/submission.csv",
     )
     parser.add_argument("--batch-size", type=int, default=4, help="Inference batch size.")
     parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers for reading DICOM files.")
@@ -116,24 +128,77 @@ def detections_to_prediction_string(
     return " ".join(parts)
 
 
+def find_best_model(experiment_dir: Path, model_file: str | None = None) -> Path:
+    """
+    在实验文件夹中查找最佳模型文件。
+    
+    Args:
+        experiment_dir: 实验文件夹路径
+        model_file: 如果指定，直接使用该文件；否则按优先级查找
+    
+    Returns:
+        模型文件路径
+    """
+    experiment_dir = Path(experiment_dir)
+    if not experiment_dir.is_dir():
+        raise NotADirectoryError(f"Experiment directory not found: {experiment_dir}")
+    
+    # 如果指定了模型文件，直接使用
+    if model_file:
+        model_path = experiment_dir / model_file
+        if model_path.is_file():
+            return model_path
+        else:
+            raise FileNotFoundError(f"Specified model file not found: {model_path}")
+    
+    # 按优先级查找模型文件
+    priority_models = [
+        "best_model_map.pth",  # 基于mAP的最佳模型
+        "best_model.pth",       # 基于loss的最佳模型
+        "last_checkpoint.pth",  # 最后一个checkpoint
+    ]
+    
+    for model_name in priority_models:
+        model_path = experiment_dir / model_name
+        if model_path.is_file():
+            print(f"Found model: {model_path}")
+            return model_path
+    
+    raise FileNotFoundError(
+        f"No model file found in {experiment_dir}. "
+        f"Expected one of: {', '.join(priority_models)}"
+    )
+
+
 def load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, device: torch.device) -> None:
+    """加载模型checkpoint。"""
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = checkpoint.get("model", checkpoint)
     model.load_state_dict(state_dict)
+    print(f"Loaded model from {checkpoint_path}")
 
 
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
+    print(f"Using device: {device}")
 
+    # 查找最佳模型
+    model_path = find_best_model(args.experiment_dir, args.model_file)
+    print(f"Using model: {model_path}")
+
+    # 读取样本提交文件
     sample_df = pd.read_csv(args.sample_submission)
     if "patientId" not in sample_df.columns:
         raise ValueError(f"`patientId` column missing in {args.sample_submission}")
 
     patient_ids: List[str] = sample_df["patientId"].tolist()
+    print(f"Found {len(patient_ids)} test images to process")
+
+    # 创建数据集和数据加载器
     dataset = RSNATestDataset(args.images_dir, patient_ids)
     data_loader = DataLoader(
         dataset,
@@ -143,28 +208,51 @@ def main() -> None:
         collate_fn=collate_fn,
     )
 
+    # 构建并加载模型
     model = build_model(num_classes=2, pretrained=False)
     model.to(device)
     model.eval()
-    load_checkpoint(model, args.checkpoint, device)
+    load_checkpoint(model, model_path, device)
 
+    # 进行预测
+    print("Running inference...")
     predictions: Dict[str, str] = {}
     with torch.no_grad():
-        for images, batch_patient_ids in data_loader:
+        for batch_idx, (images, batch_patient_ids) in enumerate(data_loader):
             images = [img.to(device) for img in images]
             outputs = model(images)
             for patient_id, output in zip(batch_patient_ids, outputs):
                 boxes = output["boxes"].detach().cpu()
                 scores = output["scores"].detach().cpu()
-                predictions[patient_id] = detections_to_prediction_string(boxes, scores, args.score_threshold)
+                predictions[patient_id] = detections_to_prediction_string(
+                    boxes, scores, args.score_threshold
+                )
+            
+            if (batch_idx + 1) % 100 == 0:
+                print(f"Processed {batch_idx + 1} batches ({len(predictions)} images)")
 
-    sample_df["PredictionString"] = sample_df["patientId"].map(lambda pid: predictions.get(pid, ""))
-    args.output_csv.parent.mkdir(parents=True, exist_ok=True)
-    sample_df.to_csv(args.output_csv, index=False)
-    print(f"Saved submission to {args.output_csv}")
+    print(f"Completed inference on {len(predictions)} images")
+
+    # 生成提交文件
+    sample_df["PredictionString"] = sample_df["patientId"].map(
+        lambda pid: predictions.get(pid, "")
+    )
+    
+    # 确定输出路径
+    if args.output_csv is None:
+        output_csv = args.experiment_dir / "submission.csv"
+    else:
+        output_csv = args.output_csv
+    
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    sample_df.to_csv(output_csv, index=False)
+    print(f"Saved submission to {output_csv}")
+    
+    # 统计信息
+    num_with_predictions = (sample_df["PredictionString"] != "").sum()
+    print(f"Summary: {num_with_predictions}/{len(sample_df)} images have predictions")
 
 
 if __name__ == "__main__":
     main()
-
 

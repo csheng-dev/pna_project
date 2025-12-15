@@ -109,6 +109,8 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         collate_fn=collate_fn,
+        persistent_workers=False,  # 避免文件描述符泄漏
+        pin_memory=False,  # 如果 num_workers=0，pin_memory 应该为 False
     )
     val_loader = DataLoader(
         val_dataset,
@@ -116,6 +118,8 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=collate_fn,
+        persistent_workers=False,  # 避免文件描述符泄漏
+        pin_memory=False,  # 如果 num_workers=0，pin_memory 应该为 False
     )
 
     model = build_model(num_classes=2, pretrained=True)
@@ -126,7 +130,16 @@ def main() -> None:
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
 
     start_epoch = 1
-    scaler = torch.amp.GradScaler(device_type="cuda") if args.use_amp and device.type == "cuda" else None
+    # 根据 PyTorch 版本选择 GradScaler 初始化方式
+    if args.use_amp and device.type == "cuda":
+        try:
+            # PyTorch >= 2.0.0 推荐使用新 API
+            scaler = torch.amp.GradScaler('cuda')
+        except (AttributeError, TypeError):
+            # 旧版本 PyTorch 回退到旧 API
+            scaler = torch.cuda.amp.GradScaler()
+    else:
+        scaler = None
 
     checkpoint = None
     if args.resume:
@@ -181,7 +194,7 @@ def main() -> None:
         # 计算之前所有epoch的总iteration数
         for prev_epoch in range(1, start_epoch):
             global_iteration += len(train_loader)
-    
+
     for epoch in range(start_epoch, args.epochs + 1):
         # 训练一个epoch，并传递全局iteration计数和mAP评估参数
         train_metrics, iter_losses, map_records = train_one_epoch(

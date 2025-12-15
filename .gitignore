@@ -1,10 +1,9 @@
 data/
+outputs/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-outputs/*.pth
-outputs/*.pt
 *.pth
 *.pt

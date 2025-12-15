@@ -4,10 +4,10 @@
 用法（在项目根目录运行）：
 
     # 指定具体的实验文件夹（训练时会自动创建以时间戳命名的文件夹）
-    python plot_metrics.py --metrics-file outputs/faster_rcnn/202412011430/metrics.jsonl --out-dir outputs/faster_rcnn/202412011430
+    python src/plot_metrics.py --metrics-file outputs/faster_rcnn/202412011430/metrics.jsonl --out-dir outputs/faster_rcnn/202412011430
     
     # 或者使用默认路径（需要根据实际实验文件夹调整）
-    python plot_metrics.py --metrics-file outputs/faster_rcnn/YYYYMMDDHHMM/metrics.jsonl --out-dir outputs/faster_rcnn/YYYYMMDDHHMM
+    python src/plot_metrics.py --metrics-file outputs/faster_rcnn/YYYYMMDDHHMM/metrics.jsonl --out-dir outputs/faster_rcnn/YYYYMMDDHHMM
 
 会在 out-dir 下生成若干 png 图片：
 - losses_train.png
