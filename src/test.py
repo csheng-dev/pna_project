@@ -52,10 +52,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("outputs/faster_rcnn/submission.csv"),
         help="Where to save the generated submission CSV.",
     )
-    parser.add_argument("--batch-size", type=int, default=4, help="Inference batch size.")
-    parser.add_argument("--num-workers", type=int, default=4, help="DataLoader workers for reading DICOM files.")
+    parser.add_argument("--batch-size", type=int, default=2, help="Inference batch size.")
+    parser.add_argument("--num-workers", type=int, default=0, help="DataLoader workers for reading DICOM files.")
     parser.add_argument("--score-threshold", type=float, default=0.5, help="Only keep detections with score >= threshold.")
     parser.add_argument("--device", type=str, default=None, help="Torch device string (e.g., cuda:0). Defaults to CUDA if available.")
+    parser.add_argument("--test-sample-limit", type=int, default=None, help="Limit the number of samples to predict. If set, only the first N samples will be predicted.")
     return parser.parse_args()
 
 
@@ -120,7 +121,9 @@ def load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, device: torch
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # weights_only=False is required because checkpoints contain optimizer/scheduler state dicts,
+    # not just model weights. Since we control the checkpoint files, this is safe.
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     state_dict = checkpoint.get("model", checkpoint)
     model.load_state_dict(state_dict)
 
@@ -129,12 +132,44 @@ def main() -> None:
     args = parse_args()
     device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    sample_df = pd.read_csv(args.sample_submission)
+    # Resolve the path to handle relative paths correctly
+    sample_submission_path = Path(args.sample_submission).resolve()
+    sample_df = pd.read_csv(sample_submission_path)
     if "patientId" not in sample_df.columns:
         raise ValueError(f"`patientId` column missing in {args.sample_submission}")
 
     patient_ids: List[str] = sample_df["patientId"].tolist()
-    dataset = RSNATestDataset(args.images_dir, patient_ids)
+    
+    # Apply sample limit if specified
+    if args.test_sample_limit is not None:
+        if args.test_sample_limit <= 0:
+            raise ValueError(f"test-sample-limit must be positive, got {args.test_sample_limit}")
+        patient_ids = patient_ids[:args.test_sample_limit]
+        print(f"Limited to {len(patient_ids)} samples (test-sample-limit={args.test_sample_limit})")
+    
+    # Filter out patient IDs that don't have corresponding DICOM files
+    images_dir = Path(args.images_dir)
+    existing_patient_ids = []
+    missing_patient_ids = []
+    for patient_id in patient_ids:
+        dicom_path = images_dir / f"{patient_id}.dcm"
+        if dicom_path.is_file():
+            existing_patient_ids.append(patient_id)
+        else:
+            missing_patient_ids.append(patient_id)
+    
+    if missing_patient_ids:
+        print(f"Warning: {len(missing_patient_ids)} patient IDs have missing DICOM files, skipping them")
+        if len(missing_patient_ids) <= 10:
+            print(f"Missing IDs: {missing_patient_ids}")
+        else:
+            print(f"First 10 missing IDs: {missing_patient_ids[:10]}")
+    
+    if not existing_patient_ids:
+        raise ValueError(f"No valid DICOM files found in {images_dir}")
+    
+    print(f"Processing {len(existing_patient_ids)} patient IDs with valid DICOM files")
+    dataset = RSNATestDataset(args.images_dir, existing_patient_ids)
     data_loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -150,7 +185,9 @@ def main() -> None:
 
     predictions: Dict[str, str] = {}
     with torch.no_grad():
-        for images, batch_patient_ids in data_loader:
+        for batch_idx, (images, batch_patient_ids) in enumerate(data_loader):
+            if batch_idx % 100 == 0:
+                print(f"Processed {batch_idx} batches")
             images = [img.to(device) for img in images]
             outputs = model(images)
             for patient_id, output in zip(batch_patient_ids, outputs):

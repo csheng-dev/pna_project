@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "python": "/home/sheng/anaconda3/envs/pna_env/bin/python",
+            "env": {
+                "CONDA_DEFAULT_ENV": "pna_env"
+            }
+        }
+    ]
+}

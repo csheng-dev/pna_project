@@ -1,5 +1,13 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
     "python-envs.defaultPackageManager": "ms-python.python:conda",
-    "python-envs.pythonProjects": []
+    "python-envs.pythonProjects": [],
+    "python.defaultInterpreterPath": "/home/sheng/anaconda3/envs/pna_env/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "code-runner.executorMap": {
+        "python": "/home/sheng/anaconda3/envs/pna_env/bin/python"
+    },
+    "code-runner.runInTerminal": true,
+    "code-runner.preserveFocus": false,
+    "code-runner.clearPreviousOutput": true
 }
