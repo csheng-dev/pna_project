@@ -64,10 +64,10 @@ def convert_val_labels_format(input_csv: Path, output_csv: Path) -> None:
 def main():
     """主程序"""
     # 输入文件
-    input_csv = Path("outputs/faster_rcnn/202512151433/val_labels.csv")
+    input_csv = Path("val_labels_nms.csv")
     
     # 输出文件（转换为与 stage_2_train_labels.csv 相同格式）
-    output_csv = Path("outputs/faster_rcnn/202512151433/val_labels_formatted.csv")
+    output_csv = Path("outputs/faster_rcnn/202512151433/val_labels_nms_formatted.csv")
     
     if not input_csv.exists():
         raise FileNotFoundError(f"文件不存在: {input_csv}")

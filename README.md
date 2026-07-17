@@ -2,6 +2,8 @@
 This is the first version implementing Faster R-CNN on RSNA Pneumonia dataset, with all default hyper parameters and pre-trained parameters. 
   - No fine-tuning is done.
   - Visualations are done by (1) adding ground truth frames to training data, (2) adding ground truth v.s. predicted frames to training data
+  - calculate IOU and map
+  - plot map and other losses
   - done testing and submission to leader board
 
 

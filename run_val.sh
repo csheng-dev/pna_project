@@ -13,7 +13,7 @@ if [ -z "$1" ]; then
         --checkpoint outputs/faster_rcnn/202512151433/best_model_map.pth \
         --images-dir data/stage_2_train_images \
         --labels-csv data/stage_2_train_labels.csv \
-        --output-csv outputs/faster_rcnn/202512151433/val_labels.csv \
+        --output-csv outputs/faster_rcnn/202512151433/val_labels_nms.csv \
         --batch-size 2 \
         --num-workers 0 \
         --score-threshold 0.5 \
@@ -24,7 +24,7 @@ else
         --checkpoint outputs/faster_rcnn/202512151433/best_model_map.pth \
         --images-dir data/stage_2_train_images \
         --labels-csv data/stage_2_train_labels.csv \
-        --output-csv val_labels.csv \
+        --output-csv val_labels_nms.csv \
         --batch-size 2 \
         --num-workers 0 \
         --score-threshold 0.5 \

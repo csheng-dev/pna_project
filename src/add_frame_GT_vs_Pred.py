@@ -183,9 +183,9 @@ def main():
     """主程序"""
     # 设置路径
     gt_labels_csv = Path("data/stage_2_train_labels.csv")
-    pred_labels_csv = Path("outputs/faster_rcnn/202512151433/val_labels_formatted.csv")
+    pred_labels_csv = Path("outputs/faster_rcnn/202512151433/val_labels_nms_formatted.csv")
     images_dir = Path("data/stage_2_train_images")
-    output_dir = Path("outputs/gt_vs_pred_comparison")
+    output_dir = Path("outputs/gt_vs_pred_comparison_nms")
     
     # 比较 GT 和预测结果
     compare_gt_vs_pred(

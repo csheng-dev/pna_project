@@ -25,6 +25,19 @@ def build_model(num_classes: int, pretrained: bool = True) -> torch.nn.Module:
     """加载 torchvision Faster R-CNN 并替换分类头，以适应 2 类（背景+肺炎）。"""
     weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT if pretrained else None
     model = fasterrcnn_resnet50_fpn(weights=weights)
+
+    ### NMS ###
+    # 查看当前NMS参数
+    print(f"score_thresh: {model.roi_heads.score_thresh}")
+    print(f"nms_thresh: {model.roi_heads.nms_thresh}")
+    print(f"detections_per_img: {model.roi_heads.detections_per_img}")
+
+    # 修改NMS参数（如果需要）
+    model.roi_heads.score_thresh = 0.3  # 提高分数阈值
+    model.roi_heads.nms_thresh = 0.4    # 降低NMS IoU阈值（更严格的NMS）
+    model.roi_heads.detections_per_img = 200  # 增加每张图片的检测框数量
+    ### NMS ###
+
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     return model
